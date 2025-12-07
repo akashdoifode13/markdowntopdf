@@ -1,102 +1,92 @@
-# Markdown to PDF Converter
+# 🎨 CSS-Styled Markdown to PDF Generator
 
-A Streamlit web application that converts markdown text to PDF with a custom footer "Powered by Draup" on every page.
+A professional PDF generation tool built with **Python**, **Streamlit**, and **ReportLab**. 
 
-## Features
+This application takes standard Markdown text and converts it into a PDF that follows strict CSS-like styling rules (custom typography, colors, table borders, and code block formatting).
 
-- 📝 Paste markdown text in the input area
-- 👁️ Live preview of your markdown
-- 📄 Convert to PDF with one click
-- 🔖 Automatic footer "Powered by Draup" on every page (bottom right corner)
-- ✨ Supports common markdown features:
-  - Headings (H1-H6)
-  - Bold and italic text
-  - Lists (bulleted and numbered)
-  - Inline code
-  - Line breaks
+## 🚀 Features
 
-## Installation
+*   **Live Preview:** See how your Markdown looks with the applied CSS styles immediately in the browser.
+*   **Custom Typography:** Supports **Barlow** (Body/Headings) and **Fira Code** (Monospace) fonts.
+    *   *Includes automatic fallback to Helvetica/Courier if font files are missing.*
+*   **CSS-to-PDF Mapping:**
+    *   **Headings:** Custom colors (`#2c3e50`, `#34495e`) and underlining styles.
+    *   **Code Blocks:** Dark theme (`#2d2d2d`) for blocks, Pink (`#e83e8c`) on Grey for inline code.
+    *   **Tables:** Styled with light grey headers (`#f4f4f4`) and subtle borders.
+    *   **Blockquotes:** Indented with a visual border.
+*   **Robust Parsing:** Handles Markdown lists, nested formatting, and HTML entities correctly.
 
-### Option 1: Automated Setup (Recommended)
+## 🛠️ Installation & Setup
 
-Run the setup script:
+### 1. Clone or Download
+Download the `app.py` file to your local machine.
+
+### 2. Install Dependencies
+Create a virtual environment (optional but recommended) and install the required Python packages:
+
 ```bash
-chmod +x setup.sh
-./setup.sh
+pip install streamlit markdown reportlab
 ```
 
-Then run the app:
+### 3. (Optional) Add Custom Fonts
+To achieve the **exact** look defined in the CSS (Barlow and Fira Code), you need to place the `.ttf` files in the same directory as `app.py`.
+
+1.  Download **Barlow** (Regular and Bold) from [Google Fonts](https://fonts.google.com/specimen/Barlow).
+2.  Download **Fira Code** (Regular) from [Google Fonts](https://fonts.google.com/specimen/Fira+Code).
+3.  Rename/Place them in your folder so they match these filenames exactly:
+    *   `Barlow-Regular.ttf`
+    *   `Barlow-Bold.ttf`
+    *   `FiraCode-Regular.ttf`
+
+*Note: If these files are not found, the app will automatically default to standard PDF fonts (Helvetica and Courier).*
+
+## ▶️ Usage
+
+Run the Streamlit application:
+
 ```bash
-./run.sh
+streamlit run app.py
 ```
 
-### Option 2: Manual Setup
+Your browser will open automatically.
+1.  **Left Panel:** Paste your Markdown text.
+2.  **Right Panel:** View the HTML styled preview.
+3.  **Button:** Click **"⬇️ Generate PDF"** to download the result.
 
-1. Create a virtual environment:
-```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+## 🎨 Configuration
+
+You can easily change the "CSS" styles by modifying the constants at the top of `app.py`.
+
+```python
+# MAPPING CSS TO PYTHON
+H1_COLOR = '#2c3e50'
+H2_COLOR = '#34495e'
+BODY_COLOR = '#000000'
+CODE_INLINE_TEXT = '#e83e8c'
+# ... etc
 ```
 
-2. Install the required packages:
-```bash
-pip install streamlit reportlab markdown
+## 📋 Project Structure
+
+```text
+├── app.py                # Main application script
+├── README.md             # Documentation
+├── Barlow-Regular.ttf    # (Optional) Custom Font
+├── Barlow-Bold.ttf       # (Optional) Custom Font
+└── FiraCode-Regular.ttf  # (Optional) Custom Font
 ```
 
-## Usage
+## 📦 Requirements
 
-### Quick Start
-```bash
-./run.sh
-```
+*   Python 3.8+
+*   Streamlit
+*   Markdown
+*   ReportLab
 
-### Manual Start
-```bash
-source venv/bin/activate  # Activate virtual environment
-streamlit run markdown_to_pdf.py
-```
+## 🤝 Troubleshooting
 
-2. Open your browser (usually opens automatically at http://localhost:8501)
+*   **"KeyError: Style already defined":** This version of the code handles style naming conflicts by using unique prefixes (`CustomBody`, `CustomH1`). It is safe to restart the app.
+*   **Fonts look standard:** Ensure the `.ttf` files are in the *exact same folder* where you are running the terminal command, and that the filenames match exactly what is in the code.
 
-3. Paste your markdown text in the left panel
-
-4. See the live preview in the right panel
-
-5. Click "Download PDF" to get your PDF file
-
-## Example Markdown
-
-```markdown
-# My Document
-
-## Introduction
-
-This is a **bold** statement and this is *italic*.
-
-### Key Points
-
-- First point
-- Second point
-- Third point
-
-## Conclusion
-
-This document was created with the Markdown to PDF converter.
-```
-
-## Notes
-
-- The footer "Powered by Draup" appears on every page in the bottom right corner
-- The app uses ReportLab for PDF generation
-- Markdown is converted to HTML first, then to PDF
-
-## Requirements
-
-- Python 3.7+
-- streamlit
-- reportlab
-- markdown
-
-## License
-
-Free to use and modify.
+---
+**Generated with ❤️ using Streamlit & ReportLab**

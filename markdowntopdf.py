@@ -2,603 +2,463 @@ import streamlit as st
 import markdown
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle, KeepTogether
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch, cm, mm
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_JUSTIFY, TA_CENTER
+from reportlab.lib.units import cm
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
 from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from io import BytesIO
 import re
 from html.parser import HTMLParser
-import html as html_module
 
-# Register DejaVu Sans fonts (similar to Barlow used in Ideal PDF)
+# ==========================================
+# 1. CONFIGURATION: MAPPING CSS TO PYTHON
+# ==========================================
+
+# Colors from your CSS
+H1_COLOR = '#2c3e50'
+H2_COLOR = '#34495e'
+H3_COLOR = '#455a64'
+BODY_COLOR = '#000000'
+CODE_INLINE_TEXT = '#e83e8c'
+CODE_INLINE_BG = '#f0f0f0'
+PRE_BLOCK_BG = '#2d2d2d'
+PRE_BLOCK_TEXT = '#ffffff'
+QUOTE_COLOR = '#666666'
+TABLE_HEAD_BG = '#f4f4f4'
+TABLE_BORDER = '#dddddd'
+
+# Fonts
+# Logic: Try to register Barlow/FiraCode. If files missing, fallback to Helvetica/Courier.
 try:
-    pdfmetrics.registerFont(TTFont('DejaVuSans', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'))
-    pdfmetrics.registerFont(TTFont('DejaVuSans-Bold', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'))
-    FONT_REGULAR = 'DejaVuSans'
-    FONT_BOLD = 'DejaVuSans-Bold'
+    # If you have the .ttf files in the same folder, this works.
+    # Otherwise it falls back to the except block.
+    pdfmetrics.registerFont(TTFont('Barlow', 'Barlow-Regular.ttf'))
+    pdfmetrics.registerFont(TTFont('Barlow-Bold', 'Barlow-Bold.ttf'))
+    pdfmetrics.registerFont(TTFont('FiraCode', 'FiraCode-Regular.ttf'))
+    BODY_FONT = 'Barlow'
+    HEAD_FONT = 'Barlow-Bold'
+    MONO_FONT = 'FiraCode'
 except:
-    FONT_REGULAR = 'Helvetica'
-    FONT_BOLD = 'Helvetica-Bold'
+    BODY_FONT = 'Helvetica'
+    HEAD_FONT = 'Helvetica-Bold'
+    MONO_FONT = 'Courier'
 
-# Colors matching Ideal PDF
-HEADING_COLOR = '#1a4a5e'  # Dark teal/blue for H2, H3
-BODY_COLOR = '#333333'
-
+# ==========================================
+# 2. MARKDOWN PROCESSING
+# ==========================================
 
 def preprocess_markdown(text):
-    """
-    Fix markdown list formatting - add blank line before lists when needed.
-    This is required because markdown lists need a blank line before them
-    to be properly detected when they follow other content.
-    """
+    """Fixes Markdown list spacing for the parser."""
     lines = text.split('\n')
     result = []
-    
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        
-        # Check if this line starts a list item (including indented ones)
-        is_list_item = bool(re.match(r'^[\s]*[\*\-]\s', line)) or bool(re.match(r'^[\s]*\d+\.\s', line))
-        
-        if is_list_item and i > 0:
-            prev_line = lines[i-1]
-            prev_stripped = prev_line.strip()
-            # Check if previous line is NOT empty and NOT a list item
-            prev_is_list = bool(re.match(r'^[\s]*[\*\-]\s', prev_line)) or bool(re.match(r'^[\s]*\d+\.\s', prev_line))
-            
-            if prev_stripped and not prev_is_list:
-                # Add blank line before this list item
-                result.append('')
-        
+        # Detect lists
+        is_list = bool(re.match(r'^[\s]*[\*\-]\s', line)) or bool(re.match(r'^[\s]*\d+\.\s', line))
+        # Ensure blank line before list starts
+        if is_list and i > 0 and lines[i-1].strip() != '':
+            result.append('')
         result.append(line)
-    
     return '\n'.join(result)
 
-
-def add_page_footer(canvas, doc):
-    """Add footer to each page"""
+def add_footer(canvas, doc):
+    """Adds a footer to every page."""
     canvas.saveState()
     page_width, page_height = A4
-    canvas.setFont(FONT_REGULAR, 9)
-    canvas.setFillColor(colors.HexColor('#666666'))
-    canvas.drawRightString(
-        page_width - 1.5 * cm,
-        1.5 * cm,
-        "Powered by Draup"
-    )
+    canvas.setFont(BODY_FONT, 8)
+    canvas.setFillColor(colors.HexColor('#888888'))
+    canvas.drawString(2 * cm, 1.0 * cm, "Generated Report")
+    canvas.drawRightString(page_width - 2 * cm, 1.0 * cm, f"Page {doc.page}")
     canvas.restoreState()
 
+# ==========================================
+# 3. HTML TO PDF PARSER
+# ==========================================
 
-class MarkdownHTMLParser(HTMLParser):
-    """Parser matching Ideal PDF styling"""
+class CSSStyleParser(HTMLParser):
     def __init__(self, styles):
         super().__init__()
         self.styles = styles
         self.story = []
         self.current_text = []
-        self.text_stack = []
-        self.in_list = False
-        self.list_level = 0
-        self.list_type_stack = []
-        self.list_counter = []
         
+        # State tracking
+        self.list_stack = [] # Stores 'ul' or 'ol'
+        self.list_counters = [] # Stores integers for 'ol'
+        self.in_pre = False     # Inside <pre> block
+        
+        # Table tracking
         self.in_table = False
-        self.in_thead = False
-        self.in_tbody = False
-        self.in_tr = False
-        self.in_td = False
+        self.rows = []
+        self.curr_row = []
+        self.curr_cell = []
         self.in_th = False
-        self.table_data = []
-        self.current_row = []
-        self.current_cell = []
-        
+
     def handle_starttag(self, tag, attrs):
-        if tag == 'table':
-            self.flush_text()
+        # Flush existing text before starting a block element
+        if tag in ['h1', 'h2', 'h3', 'p', 'ul', 'ol', 'li', 'table', 'blockquote', 'pre']:
+            self.flush()
+
+        if tag == 'ul':
+            self.list_stack.append('ul')
+        elif tag == 'ol':
+            self.list_stack.append('ol')
+            self.list_counters.append(0)
+        elif tag == 'li':
+            if self.list_stack and self.list_stack[-1] == 'ol':
+                self.list_counters[-1] += 1
+        
+        elif tag == 'table':
             self.in_table = True
-            self.table_data = []
-        elif tag == 'thead':
-            self.in_thead = True
-        elif tag == 'tbody':
-            self.in_tbody = True
+            self.rows = []
         elif tag == 'tr':
-            self.in_tr = True
-            self.current_row = []
-        elif tag == 'th':
-            self.in_th = True
-            self.current_cell = []
-        elif tag == 'td':
-            self.in_td = True
-            self.current_cell = []
-        elif tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-            self.flush_text()
-            self.text_stack.append(tag)
+            self.curr_row = []
+        elif tag in ['td', 'th']:
+            self.curr_cell = []
+            self.in_th = (tag == 'th')
+            
+        elif tag == 'pre':
+            self.in_pre = True
+            
+        elif tag == 'code':
+            # CSS: :not(pre)>code
+            if not self.in_pre:
+                self.current_text.append(f'<font face="{MONO_FONT}" color="{CODE_INLINE_TEXT}" backColor="{CODE_INLINE_BG}">')
+        
         elif tag in ['strong', 'b']:
             self.current_text.append('<b>')
         elif tag in ['em', 'i']:
             self.current_text.append('<i>')
-        elif tag == 'code':
-            self.current_text.append('<font face="Courier" size="10">')
-        elif tag == 'ul':
-            self.flush_text()
-            self.in_list = True
-            self.list_level += 1
-            self.list_type_stack.append('ul')
-        elif tag == 'ol':
-            self.flush_text()
-            self.in_list = True
-            self.list_level += 1
-            self.list_type_stack.append('ol')
-            self.list_counter.append(0)
-        elif tag == 'li':
-            self.flush_text()
-            if self.list_type_stack and self.list_type_stack[-1] == 'ol':
-                self.list_counter[-1] += 1
+            
         elif tag == 'br':
-            if self.in_td or self.in_th:
-                self.current_cell.append('\n')
+            if self.in_table:
+                self.curr_cell.append('<br/>')
             else:
                 self.current_text.append('<br/>')
-        elif tag == 'p':
-            self.flush_text()
-        elif tag == 'hr':
-            self.flush_text()
-            self.story.append(Spacer(1, 12))
-            
+
     def handle_endtag(self, tag):
-        if tag == 'table':
-            self.create_table()
-            self.in_table = False
-        elif tag == 'thead':
-            self.in_thead = False
-        elif tag == 'tbody':
-            self.in_tbody = False
-        elif tag == 'tr':
-            if self.current_row:
-                self.table_data.append(self.current_row)
-            self.current_row = []
-            self.in_tr = False
-        elif tag == 'th':
-            cell_text = ''.join(self.current_cell).strip()
-            self.current_row.append(cell_text)
-            self.current_cell = []
-            self.in_th = False
-        elif tag == 'td':
-            cell_text = ''.join(self.current_cell).strip()
-            self.current_row.append(cell_text)
-            self.current_cell = []
-            self.in_td = False
-        elif tag in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-            self.flush_text(heading_tag=tag)
-            if self.text_stack and self.text_stack[-1] == tag:
-                self.text_stack.pop()
+        # Flush text when closing block elements
+        if tag in ['h1', 'h2', 'h3', 'p', 'li', 'blockquote', 'pre']:
+            self.flush(tag)
+
+        if tag == 'ul':
+            self.list_stack.pop()
+            if not self.list_stack: self.story.append(Spacer(1, 8))
+        elif tag == 'ol':
+            self.list_stack.pop()
+            self.list_counters.pop()
+            if not self.list_stack: self.story.append(Spacer(1, 8))
+            
+        elif tag == 'pre':
+            self.in_pre = False
+            
+        elif tag == 'code':
+            if not self.in_pre:
+                self.current_text.append('</font>')
+                
         elif tag in ['strong', 'b']:
             self.current_text.append('</b>')
         elif tag in ['em', 'i']:
             self.current_text.append('</i>')
-        elif tag == 'code':
-            self.current_text.append('</font>')
-        elif tag == 'ul':
-            self.in_list = self.list_level > 1
-            self.list_level -= 1
-            if self.list_type_stack:
-                self.list_type_stack.pop()
-            if self.list_level == 0:
-                self.story.append(Spacer(1, 10))
-        elif tag == 'ol':
-            self.in_list = self.list_level > 1
-            self.list_level -= 1
-            if self.list_type_stack:
-                self.list_type_stack.pop()
-            if self.list_counter:
-                self.list_counter.pop()
-            if self.list_level == 0:
-                self.story.append(Spacer(1, 10))
-        elif tag == 'li':
-            self.flush_text(is_list_item=True)
-        elif tag == 'p':
-            self.flush_text()
-    
-    def handle_entityref(self, name):
-        """Handle HTML entities like &amp; -> &"""
-        try:
-            char = html_module.unescape(f'&{name};')
-        except:
-            char = f'&{name};'
-        if self.in_td or self.in_th:
-            self.current_cell.append(char)
-        else:
-            self.current_text.append(char)
             
-    def handle_charref(self, name):
-        """Handle numeric character references"""
-        try:
-            char = html_module.unescape(f'&#{name};')
-        except:
-            char = f'&#{name};'
-        if self.in_td or self.in_th:
-            self.current_cell.append(char)
-        else:
-            self.current_text.append(char)
+        elif tag == 'table':
+            self.build_table()
+            self.in_table = False
+        elif tag == 'tr':
+            if self.curr_row: self.rows.append(self.curr_row)
+        elif tag in ['td', 'th']:
+            content = "".join(self.curr_cell).strip()
+            if not content: content = "&nbsp;"
             
+            # Select style based on TH or TD
+            style = self.styles['CustomTH'] if self.in_th else self.styles['CustomTD']
+            self.curr_row.append(Paragraph(content, style))
+
     def handle_data(self, data):
-        if self.in_td or self.in_th:
-            self.current_cell.append(data)
+        if self.in_table:
+            self.curr_cell.append(data)
         else:
             self.current_text.append(data)
-    
-    def create_table(self):
-        """Create table matching Ideal PDF - white header, box border"""
-        if not self.table_data:
-            return
-        
-        num_cols = len(self.table_data[0]) if self.table_data else 0
-        if num_cols == 0:
-            return
-        
-        available_width = 17 * cm
-        col_widths = [available_width / num_cols] * num_cols
-        
-        formatted_data = []
-        for i, row in enumerate(self.table_data):
-            formatted_row = []
-            for cell in row:
-                # Escape & for reportlab XML parsing
-                safe_cell = cell.replace('&', '&amp;')
-                if i == 0:
-                    para = Paragraph(f"<b>{safe_cell}</b>", self.styles['TableHeader'])
-                else:
-                    para = Paragraph(safe_cell, self.styles['TableCell'])
-                formatted_row.append(para)
-            formatted_data.append(formatted_row)
-        
-        table = Table(formatted_data, colWidths=col_widths, repeatRows=1)
-        
-        # Ideal PDF style: WHITE header background, BOX border around table
-        table.setStyle(TableStyle([
-            # Header - WHITE background with BOLD text
-            ('BACKGROUND', (0, 0), (-1, 0), colors.white),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.HexColor('#333333')),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('FONTNAME', (0, 0), (-1, 0), FONT_BOLD),
-            ('FONTSIZE', (0, 0), (-1, 0), 11),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('TOPPADDING', (0, 0), (-1, 0), 12),
-            ('LEFTPADDING', (0, 0), (-1, -1), 12),
-            ('RIGHTPADDING', (0, 0), (-1, -1), 12),
             
-            # Body
-            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-            ('TEXTCOLOR', (0, 1), (-1, -1), colors.HexColor('#333333')),
-            ('FONTNAME', (0, 1), (-1, -1), FONT_REGULAR),
-            ('FONTSIZE', (0, 1), (-1, -1), 11),
-            ('TOPPADDING', (0, 1), (-1, -1), 10),
-            ('BOTTOMPADDING', (0, 1), (-1, -1), 10),
-            
-            # BOX border around entire table
-            ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#cccccc')),
-            
-            # Line below header
-            ('LINEBELOW', (0, 0), (-1, 0), 1, colors.HexColor('#cccccc')),
-            
-            # Horizontal lines between rows
-            ('LINEBELOW', (0, 1), (-1, -2), 0.5, colors.HexColor('#e0e0e0')),
-            
-            # Vertical lines between columns
-            ('LINEBEFORE', (1, 0), (-1, -1), 0.5, colors.HexColor('#e0e0e0')),
-            
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ]))
-        
-        self.story.append(Spacer(1, 16))
-        self.story.append(table)
-        self.story.append(Spacer(1, 16))
-        self.table_data = []
-        
-    def flush_text(self, heading_tag=None, is_list_item=False):
-        if not self.current_text:
-            return
-            
-        text = ''.join(self.current_text).strip()
-        if not text:
-            self.current_text = []
-            return
-        
-        # Escape & for reportlab XML parsing
-        safe_text = text.replace('&', '&amp;')
-        
-        if is_list_item or self.in_list:
-            # Different bullet for different levels (matching Ideal PDF)
-            # Level 1: • (filled circle)
-            # Level 2+: ◦ (hollow circle)
-            if self.list_level == 1:
-                bullet = "•"
-                indent = 28
-            else:
-                bullet = "◦"
-                indent = 28 + (self.list_level - 1) * 24
-            
-            para_style = ParagraphStyle(
-                'BulletItem',
-                parent=self.styles['Normal'],
-                leftIndent=indent,
-                firstLineIndent=-14,
-                spaceBefore=5,
-                spaceAfter=5,
-                fontSize=12,
-                leading=18,
-                fontName=FONT_REGULAR,
-            )
-            bullet_text = f"{bullet}  {safe_text}"
-            self.story.append(Paragraph(bullet_text, para_style))
-        elif heading_tag:
-            style_name = f'Custom{heading_tag.upper()}'
-            self.story.append(Paragraph(safe_text, self.styles[style_name]))
-            spacing = {'h1': 16, 'h2': 14, 'h3': 12, 'h4': 10, 'h5': 8, 'h6': 8}
-            self.story.append(Spacer(1, spacing.get(heading_tag, 10)))
-        else:
-            self.story.append(Paragraph(safe_text, self.styles['CustomBody']))
-            self.story.append(Spacer(1, 10))
-            
+    def handle_entityref(self, name):
+        char = f'&{name};'
+        if self.in_table: self.curr_cell.append(char)
+        else: self.current_text.append(char)
+
+    def flush(self, tag=None):
+        text = "".join(self.current_text).strip()
+        if not text: return
         self.current_text = []
+        
+        # XML Escape for ReportLab
+        text = text.replace('&', '&amp;')
 
+        if tag == 'h1':
+            self.story.append(Paragraph(text, self.styles['CustomH1']))
+        elif tag == 'h2':
+            self.story.append(Paragraph(text, self.styles['CustomH2']))
+        elif tag == 'h3':
+            self.story.append(Paragraph(text, self.styles['CustomH3']))
+        elif tag == 'blockquote':
+            self.story.append(Paragraph(text, self.styles['CustomQuote']))
+        elif tag == 'pre':
+            # Handle newlines in code blocks
+            text = text.replace('\n', '<br/>')
+            self.story.append(Paragraph(text, self.styles['CustomPre']))
+        elif tag == 'li':
+            # List Logic
+            level = len(self.list_stack)
+            indent = (level - 1) * 20 + 10
+            if self.list_stack[-1] == 'ol':
+                bullet = f"{self.list_counters[-1]}."
+            else:
+                bullet = "•"
+            
+            style = ParagraphStyle(
+                'ListItem', parent=self.styles['CustomBody'],
+                leftIndent=indent+15, firstLineIndent=-15, spaceAfter=2
+            )
+            self.story.append(Paragraph(f"{bullet} {text}", style))
+        elif tag == 'p':
+            self.story.append(Paragraph(text, self.styles['CustomBody']))
 
-def create_styles():
-    """Create styles matching Ideal PDF"""
+    def build_table(self):
+        if not self.rows: return
+        cols = len(self.rows[0])
+        if cols == 0: return
+        
+        # Calculate width
+        avail_width = 17 * cm
+        col_width = avail_width / cols
+        
+        t = Table(self.rows, colWidths=[col_width]*cols, repeatRows=1)
+        
+        # CSS: border: 1px solid #ddd; th { background-color: #f4f4f4 }
+        style_cmds = [
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor(TABLE_BORDER)),
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor(TABLE_HEAD_BG)),
+            ('LEFTPADDING', (0,0), (-1,-1), 6),
+            ('RIGHTPADDING', (0,0), (-1,-1), 6),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ]
+        t.setStyle(TableStyle(style_cmds))
+        self.story.append(Spacer(1, 12))
+        self.story.append(t)
+        self.story.append(Spacer(1, 12))
+
+# ==========================================
+# 4. STYLES DEFINITION
+# ==========================================
+
+def get_css_styles():
+    """Create ParagraphStyles that strictly match the CSS provided."""
     styles = getSampleStyleSheet()
     
-    # Body - 12pt with good line spacing
+    # Base Body
     styles.add(ParagraphStyle(
         name='CustomBody',
         parent=styles['Normal'],
-        fontName=FONT_REGULAR,
-        fontSize=12,
-        leading=20,
+        fontName=BODY_FONT,
+        fontSize=11,
+        leading=11 * 1.6, # CSS line-height: 1.6
         textColor=colors.HexColor(BODY_COLOR),
-        alignment=TA_LEFT,
-        spaceAfter=10,
-        spaceBefore=0
+        spaceAfter=12,
+        alignment=TA_LEFT
     ))
-    
-    # H1 - Black (main title)
+
+    # Headings
     styles.add(ParagraphStyle(
         name='CustomH1',
-        fontName=FONT_BOLD,
-        fontSize=24,
-        leading=28,
-        textColor=colors.HexColor('#1a1a1a'),
-        spaceAfter=10,
-        spaceBefore=20,
-        alignment=TA_LEFT,
+        parent=styles['Normal'],
+        fontName=HEAD_FONT,
+        fontSize=26, # ~2.2em
+        leading=32,
+        textColor=colors.HexColor(H1_COLOR),
+        spaceBefore=24, spaceAfter=12,
         keepWithNext=True
     ))
     
-    # H2 - BLUE/TEAL (section headers like "Executive Summary", "Market Signals")
     styles.add(ParagraphStyle(
         name='CustomH2',
-        fontName=FONT_BOLD,
-        fontSize=18,
-        leading=24,
-        textColor=colors.HexColor(HEADING_COLOR),
-        spaceAfter=10,
-        spaceBefore=20,
-        alignment=TA_LEFT,
+        parent=styles['Normal'],
+        fontName=HEAD_FONT,
+        fontSize=22, # ~1.8em
+        leading=28,
+        textColor=colors.HexColor(H2_COLOR),
+        spaceBefore=20, spaceAfter=10,
         keepWithNext=True
     ))
     
-    # H3 - BLUE/TEAL (subsection headers like "M&A & Partnerships", "Executive Movements")
     styles.add(ParagraphStyle(
         name='CustomH3',
-        fontName=FONT_BOLD,
-        fontSize=15,
-        leading=20,
-        textColor=colors.HexColor(HEADING_COLOR),
-        spaceAfter=8,
-        spaceBefore=16,
-        alignment=TA_LEFT,
+        parent=styles['Normal'],
+        fontName=HEAD_FONT,
+        fontSize=17, # ~1.4em
+        leading=22,
+        textColor=colors.HexColor(H3_COLOR),
+        spaceBefore=16, spaceAfter=8,
         keepWithNext=True
     ))
-    
-    # H4
+
+    # Blockquote
     styles.add(ParagraphStyle(
-        name='CustomH4',
-        fontName=FONT_BOLD,
-        fontSize=13,
-        leading=18,
-        textColor=colors.HexColor('#2a5a6e'),
-        spaceAfter=6,
-        spaceBefore=14,
-        alignment=TA_LEFT,
-        keepWithNext=True
-    ))
-    
-    # H5 & H6
-    styles.add(ParagraphStyle(
-        name='CustomH5',
-        fontName=FONT_BOLD,
-        fontSize=12,
-        leading=16,
-        textColor=colors.HexColor('#3a6a7e'),
-        spaceAfter=5,
-        spaceBefore=12,
-        alignment=TA_LEFT
-    ))
-    
-    styles.add(ParagraphStyle(
-        name='CustomH6',
-        fontName=FONT_BOLD,
-        fontSize=12,
-        leading=16,
-        textColor=colors.HexColor('#4a7a8e'),
-        spaceAfter=5,
-        spaceBefore=10,
-        alignment=TA_LEFT
-    ))
-    
-    # Table styles - white background, clean look
-    styles.add(ParagraphStyle(
-        name='TableHeader',
-        fontName=FONT_BOLD,
+        name='CustomQuote',
+        parent=styles['Normal'],
+        fontName=BODY_FONT,
         fontSize=11,
-        leading=15,
-        textColor=colors.HexColor('#333333'),
-        alignment=TA_LEFT
+        leading=11 * 1.6,
+        textColor=colors.HexColor(QUOTE_COLOR),
+        leftIndent=15, # Indentation
+        spaceAfter=12
+    ))
+
+    # Pre/Code Block
+    styles.add(ParagraphStyle(
+        name='CustomPre',
+        parent=styles['Normal'],
+        fontName=MONO_FONT,
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor(PRE_BLOCK_TEXT),
+        backColor=colors.HexColor(PRE_BLOCK_BG),
+        borderPadding=10, # CSS padding
+        spaceAfter=12,
+        splitLongWords=True
+    ))
+
+    # Table Cells
+    styles.add(ParagraphStyle(
+        name='CustomTD',
+        parent=styles['Normal'],
+        fontName=BODY_FONT,
+        fontSize=10,
+        leading=14,
+        textColor=colors.black
     ))
     
     styles.add(ParagraphStyle(
-        name='TableCell',
-        fontName=FONT_REGULAR,
-        fontSize=11,
-        leading=15,
-        textColor=colors.HexColor('#333333'),
-        alignment=TA_LEFT
+        name='CustomTH',
+        parent=styles['Normal'],
+        fontName=HEAD_FONT,
+        fontSize=10,
+        leading=14,
+        textColor=colors.black,
+        alignment=TA_CENTER
     ))
-    
+
     return styles
 
+# ==========================================
+# 5. MAIN CONVERSION FUNCTION
+# ==========================================
 
-def markdown_to_pdf(markdown_text):
-    """Convert markdown to PDF matching Ideal PDF style"""
-    # Preprocess markdown to fix list formatting issues
-    fixed_markdown = preprocess_markdown(markdown_text)
-    
-    # Convert to HTML (removed nl2br extension which was breaking list detection)
-    html_content = markdown.markdown(
-        fixed_markdown,
-        extensions=['extra', 'sane_lists', 'tables']
-    )
-    
+def markdown_to_pdf(md_text):
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        rightMargin=2 * cm,
-        leftMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2.5 * cm
+        rightMargin=2*cm, leftMargin=2*cm,
+        topMargin=2*cm, bottomMargin=2*cm
     )
     
-    styles = create_styles()
-    parser = MarkdownHTMLParser(styles)
-    parser.feed(html_content)
-    story = parser.story
+    # Preprocess and Convert to HTML
+    clean_md = preprocess_markdown(md_text)
+    # 'extra' enables tables, fenced code blocks, etc.
+    html_content = markdown.markdown(clean_md, extensions=['extra'])
     
-    doc.build(story, onFirstPage=add_page_footer, onLaterPages=add_page_footer)
+    # Parse HTML to PDF Elements
+    styles = get_css_styles()
+    parser = CSSStyleParser(styles)
+    parser.feed(html_content)
+    
+    # Build PDF
+    doc.build(parser.story, onFirstPage=add_footer, onLaterPages=add_footer)
     
     buffer.seek(0)
     return buffer
 
+# ==========================================
+# 6. STREAMLIT UI
+# ==========================================
 
 def main():
-    st.set_page_config(
-        page_title="Markdown to PDF Converter",
-        layout="wide",
-        initial_sidebar_state="collapsed"
-    )
+    st.set_page_config(page_title="CSS Styled PDF Generator", layout="wide")
     
-    st.title("📄 Markdown to PDF Converter")
-    st.markdown("Convert your markdown to **professional PDFs** matching the Ideal format.")
-    
-    with st.expander("💡 Features (Matching Ideal PDF)", expanded=False):
-        st.markdown("""
-        ### Typography
-        - Body: DejaVuSans 12pt
-        - H1: Bold 24pt (Black)
-        - H2/H3: Bold 18pt/15pt (Blue/Teal #1a4a5e)
-        
-        ### Bullet Points
-        - Level 1: • (filled circle)
-        - Level 2+: ◦ (hollow circle) with proper indentation
-        - **Fixed:** Lists after bold text now render correctly
-        
-        ### Tables
-        - White header background (not gray)
-        - Box border around entire table
-        - Vertical column separators
-        - Clean, professional look
-        
-        ### Formatting
-        - A4 page size with 2cm margins
-        - "Powered by Draup" footer on every page
-        - Proper spacing and line heights
-        """)
-    
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        st.subheader("📝 Input Markdown")
-        markdown_text = st.text_area(
-            "Paste your markdown here:",
-            height=550,
-            placeholder="""# ABM Intelligence Report: L'Oréal
+    st.title("🎨 CSS-to-PDF Generator")
+    st.markdown("This tool converts markdown to PDF using the **exact styling** specified.")
 
-**Prepared for:** Inetum | **Date:** 12-06-2025
+    col1, col2 = st.columns([1, 1])
+
+    default_text = """# Project Alpha Status
+**Client:** Acme Corp | **Date:** Oct 2025
 
 ## Executive Summary
+The project is on track. We are adhering to the new styling guidelines.
 
-**Target Account Overview:** L'Oréal is a global leader...
+> "Design is not just what it looks like and feels like. Design is how it works."
 
-### Deal Activity
+### Technical Implementation
+We are using the following loop structure:
 
-**Target Account Engagements:**
-* L'Oréal recently engaged Capgemini for a large-scale Cloud migration project.
-* IBM was awarded a contract for AI model development.
+def optimize_process(data):
+for item in data:
+# Process item
+print(f"Processing {item}")
+return True
 
-**Competitive Landscape:**
-* **Capgemini:** Winning large infrastructure and cloud deals.
-* **IBM:** Winning high-value AI/Data science deals (C3).
-* **Accenture:** Remains the incumbent for high-level strategy.
+Inline code looks like `api_key = "123"` and `user_id`.
 
-Your content here...""",
-            help="Professional PDF matching Ideal format"
-        )
-    
+### Resource Allocation
+
+| Role | Count | Allocation |
+| :--- | :--- | :--- |
+| Backend Dev | 4 | 100% |
+| Frontend Dev | 3 | 100% |
+| QA Engineer | 2 | 50% |
+"""
+
+    with col1:
+        st.subheader("📝 Input Markdown")
+        md_input = st.text_area("Type your markdown here:", value=default_text, height=600)
+
     with col2:
-        st.subheader("👁️ Live Preview")
-        if markdown_text:
-            st.markdown(markdown_text)
-        else:
-            st.info("Your markdown preview will appear here")
-    
-    st.divider()
-    
-    if markdown_text:
-        col_info, col_btn, col_space = st.columns([2, 1, 1])
-        
-        with col_info:
-            st.markdown("""
-            **📋 Your PDF will include:**
-            - ✨ Blue/teal headings (H2, H3)
-            - ✨ Proper bullet points (• and ◦)
-            - ✨ Clean tables with box borders
-            - ✨ A4 format with 2cm margins
-            - ✨ "Powered by Draup" footer
-            """)
-        
-        with col_btn:
-            try:
-                pdf_buffer = markdown_to_pdf(markdown_text)
-                st.download_button(
-                    label="⬇️ Download PDF",
-                    data=pdf_buffer,
-                    file_name="document.pdf",
-                    mime="application/pdf",
-                    use_container_width=True,
-                    type="primary"
-                )
-                st.success("✅ PDF Ready!")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-                with st.expander("Show details"):
-                    st.exception(e)
-    else:
-        st.info("👆 Enter markdown text above to generate your PDF")
+        st.subheader("👁️ Preview (Styled)")
+        # Injecting CSS to make the preview match the PDF output
+        st.markdown(f"""
+        <style>
+            h1 {{ color: {H1_COLOR} !important; border-bottom: 2px solid #eee; padding-bottom: 0.5rem; }}
+            h2 {{ color: {H2_COLOR} !important; }}
+            h3 {{ color: {H3_COLOR} !important; }}
+            p {{ line-height: 1.6; color: {BODY_COLOR}; }}
+            code {{ background-color: {CODE_INLINE_BG}; color: {CODE_INLINE_TEXT}; padding: 2px 4px; border-radius: 3px; }}
+            pre {{ background-color: {PRE_BLOCK_BG}; padding: 10px; border-radius: 4px; }}
+            pre code {{ color: {PRE_BLOCK_TEXT}; background-color: transparent; }}
+            blockquote {{ border-left: 4px solid #ddd; padding-left: 1em; color: {QUOTE_COLOR}; }}
+            th {{ background-color: {TABLE_HEAD_BG}; border: 1px solid {TABLE_BORDER}; }}
+            td {{ border: 1px solid {TABLE_BORDER}; }}
+        </style>
+        """, unsafe_allow_html=True)
+        st.markdown(md_input, unsafe_allow_html=True)
 
+    st.divider()
+
+    if st.button("⬇️ Generate PDF", type="primary"):
+        try:
+            pdf_file = markdown_to_pdf(md_input)
+            st.download_button(
+                label="Download Final PDF",
+                data=pdf_file,
+                file_name="styled_report.pdf",
+                mime="application/pdf"
+            )
+            st.success("PDF created successfully!")
+        except Exception as e:
+            st.error(f"Error generating PDF: {e}")
 
 if __name__ == "__main__":
     main()
